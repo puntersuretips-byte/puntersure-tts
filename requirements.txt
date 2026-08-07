@@ -1,8 +1,8 @@
-fastapi==0.115.12
-uvicorn==0.34.0
-edge-tts==7.2.8
-miniaudio==1.71
-numpy==2.2.4
-lameenc==1.8.4
-boto3==1.36.33
-pydantic==2.11.3
+fastapi>=0.115,<1
+uvicorn>=0.34,<1
+edge-tts>=7.2,<8
+miniaudio>=1.71,<2
+numpy>=2.3.2,<3
+lameenc>=1.8.4
+boto3>=1.36,<2
+pydantic>=2.11,<3
