@@ -9,7 +9,7 @@ from botocore.client import Config as BotoConfig
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
-from tts_gen import synth
+from tts_gen import synth_segments
 
 app = FastAPI(title="Puntersure TTS Service")
 
@@ -22,10 +22,19 @@ MAX_TEXT = 4000
 PUBLIC_BASE = os.environ.get("PUBLIC_BASE", "")
 
 
-class TTSRequest(BaseModel):
+class TTSSegment(BaseModel):
     text: str
+    rate: str = "+0%"
+    pitch: str = "+0Hz"
+    volume: str = "+0%"
+    break_after_ms: int = 0
+
+
+class TTSRequest(BaseModel):
+    text: str | None = None
     filename: str = "audio"
     voice: str | None = None
+    segments: list[TTSSegment] | None = None
 
 
 def make_client():
@@ -79,10 +88,14 @@ def health():
 
 @app.post("/tts")
 async def tts(req: TTSRequest):
-    text = req.text.strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="text is required")
-    if len(text) > MAX_TEXT:
+    segments = [s for s in (req.segments or []) if (s.text or "").strip()]
+    if not segments:
+        if not (req.text or "").strip():
+            raise HTTPException(status_code=400, detail="text or segments is required")
+        segments = [TTSSegment(text=req.text.strip())]
+
+    total_chars = sum(len(s.text) for s in segments)
+    if total_chars > MAX_TEXT:
         raise HTTPException(
             status_code=400, detail=f"text too long (max {MAX_TEXT} chars)"
         )
@@ -100,7 +113,19 @@ async def tts(req: TTSRequest):
 
     voice = req.voice or os.environ.get("TTS_VOICE", "en-KE-AsiliaNeural")
     try:
-        mp3 = await synth(text, voice=voice)
+        mp3 = await synth_segments(
+            [
+                {
+                    "text": s.text,
+                    "rate": s.rate,
+                    "pitch": s.pitch,
+                    "volume": s.volume,
+                    "break_after_ms": s.break_after_ms,
+                }
+                for s in segments
+            ],
+            voice=voice,
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"TTS synthesis failed: {exc}")
 

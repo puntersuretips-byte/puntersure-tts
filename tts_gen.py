@@ -16,11 +16,16 @@ KEEP_LEAD = 0.12
 KEEP_TAIL = 0.20
 BITRATE = 128
 
+DEFAULT_RATE = "+0%"
+DEFAULT_PITCH = "+0Hz"
+DEFAULT_VOLUME = "+0%"
+
 
 def trim_sentence_gaps(pcm: np.ndarray, sr: int) -> np.ndarray:
     """Collapse the ~0.94s pure-zero silences edge-tts inserts at every
     full stop down to a natural ~0.35s gap. Words (and their natural
-    onsets) are left untouched."""
+    onsets) are left untouched. The final trailing silence is reduced to
+    ~0.10s so an explicit <break> can be spliced in precisely afterwards."""
     silent = np.abs(pcm) < THRESH
     n = len(pcm)
 
@@ -59,9 +64,39 @@ def trim_sentence_gaps(pcm: np.ndarray, sr: int) -> np.ndarray:
     return pcm[keep]
 
 
-async def synth(text: str, voice: str = VOICE) -> bytes:
-    """Synthesize text with edge-tts, trim sentence-gap silences, return MP3 bytes."""
-    com = edge_tts.Communicate(text, voice)
+def trailing_silence(pcm: np.ndarray, sr: int) -> float:
+    """Duration (seconds) of the near-silent run at the very end of pcm."""
+    if len(pcm) == 0:
+        return 0.0
+    silent = np.abs(pcm) < THRESH
+    n = len(pcm)
+    i = n
+    while i > 0 and silent[i - 1]:
+        i -= 1
+    return (n - i) / sr
+
+
+def pad_to_gap(pcm: np.ndarray, sr: int, break_ms: int) -> np.ndarray:
+    """Pad pcm so the total inter-segment gap equals exactly break_ms."""
+    target = break_ms / 1000.0
+    trail = trailing_silence(pcm, sr)
+    need = target - trail
+    if need > 0:
+        pad = np.zeros(int(round(need * sr)), dtype=np.float32)
+        return np.concatenate([pcm, pad])
+    return pcm
+
+
+async def synth_segment(
+    text: str,
+    voice: str = VOICE,
+    rate: str = DEFAULT_RATE,
+    pitch: str = DEFAULT_PITCH,
+    volume: str = DEFAULT_VOLUME,
+) -> tuple:
+    """Synthesize one plain-text segment, trim natural sentence gaps,
+    return (pcm float32 mono, sample_rate)."""
+    com = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch, volume=volume)
     chunks = []
     async for chunk in com.stream():
         if chunk["type"] == "audio":
@@ -69,7 +104,7 @@ async def synth(text: str, voice: str = VOICE) -> bytes:
     raw = b"".join(chunks)
 
     if not raw:
-        raise RuntimeError("edge-tts returned no audio")
+        raise RuntimeError("edge-tts returned no audio for segment")
 
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
         tmp.write(raw)
@@ -83,9 +118,47 @@ async def synth(text: str, voice: str = VOICE) -> bytes:
 
     sr = d.sample_rate
     x = np.asarray(d.samples, dtype=np.float32)
-    y = trim_sentence_gaps(x, sr)
+    return trim_sentence_gaps(x, sr), sr
 
-    pcm16 = (np.clip(y, -1.0, 1.0) * 32767).astype(np.int16)
+
+async def synth_segments(segments: list, voice: str = VOICE) -> bytes:
+    """Synthesize an ordered list of segments and splice them into one MP3.
+
+    Each segment dict: {"text", "rate", "pitch", "volume", "break_after_ms"}.
+    A break_after_ms > 0 inserts that many milliseconds of silence (on top of
+    the trimmed natural sentence pause) before the next segment, matching the
+    <break time="..."/> pacing the Edge service itself refuses to support.
+    """
+    master = None
+    sr = None
+
+    for seg in segments:
+        text = (seg.get("text") or "").strip()
+        if not text:
+            continue
+        x, s = await synth_segment(
+            text,
+            voice,
+            rate=seg.get("rate", DEFAULT_RATE),
+            pitch=seg.get("pitch", DEFAULT_PITCH),
+            volume=seg.get("volume", DEFAULT_VOLUME),
+        )
+        if sr is None:
+            sr = s
+
+        break_ms = int(seg.get("break_after_ms", 0) or 0)
+        if break_ms > 0:
+            x = pad_to_gap(x, sr, break_ms)
+
+        if master is None:
+            master = x
+        else:
+            master = np.concatenate([master, x])
+
+    if master is None:
+        raise RuntimeError("no segments produced audio")
+
+    pcm16 = (np.clip(master, -1.0, 1.0) * 32767).astype(np.int16)
     enc = lameenc.Encoder()
     enc.set_bit_rate(BITRATE)
     enc.set_in_sample_rate(sr)
@@ -95,6 +168,11 @@ async def synth(text: str, voice: str = VOICE) -> bytes:
     out += enc.encode(pcm16.tobytes())
     out += enc.flush()
     return bytes(out)
+
+
+async def synth(text: str, voice: str = VOICE) -> bytes:
+    """Backward-compatible single-text synthesis."""
+    return await synth_segments([{"text": text}], voice)
 
 
 def synth_sync(text: str) -> bytes:
