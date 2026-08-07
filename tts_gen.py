@@ -14,6 +14,7 @@ MIN_PAUSE = 0.40
 TARGET_GAP = 0.35
 KEEP_LEAD = 0.12
 KEEP_TAIL = 0.20
+KEEP_START_SILENCE = 0.02
 BITRATE = 128
 
 DEFAULT_RATE = "+0%"
@@ -62,6 +63,26 @@ def trim_sentence_gaps(pcm: np.ndarray, sr: int) -> np.ndarray:
             keep[new_e:e] = False
 
     return pcm[keep]
+
+
+def trim_leading_silence(
+    pcm: np.ndarray, sr: int, keep_s: float = KEEP_START_SILENCE
+) -> np.ndarray:
+    """Remove the near-silent run edge-tts prepends to every utterance
+    (often ~0.3s). If left in place, each segment's lead silence sits on top
+    of the previous segment's requested break, so the real gap reads ~0.3s
+    longer than asked and the next sentence's first word sounds late."""
+    if len(pcm) == 0:
+        return pcm
+    silent = np.abs(pcm) < THRESH
+    n = len(pcm)
+    i = 0
+    while i < n and silent[i]:
+        i += 1
+    start = max(0, i - int(keep_s * sr))
+    if start == 0:
+        return pcm
+    return pcm[start:]
 
 
 def trailing_silence(pcm: np.ndarray, sr: int) -> float:
@@ -118,7 +139,9 @@ async def synth_segment(
 
     sr = d.sample_rate
     x = np.asarray(d.samples, dtype=np.float32)
-    return trim_sentence_gaps(x, sr), sr
+    x = trim_sentence_gaps(x, sr)
+    x = trim_leading_silence(x, sr)
+    return x, sr
 
 
 async def synth_segments(segments: list, voice: str = VOICE) -> bytes:
