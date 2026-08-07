@@ -57,6 +57,21 @@ def upload_to_b2(data: bytes, key: str, content_type: str) -> str:
     return key
 
 
+def object_exists(key: str) -> bool:
+    client = make_client()
+    try:
+        client.head_object(Bucket=B2_BUCKET, Key=key)
+        return True
+    except Exception:
+        return False
+
+
+def public_url(key: str) -> str:
+    if PUBLIC_BASE:
+        return f"{PUBLIC_BASE.rstrip('/')}/{key}"
+    return f"{B2_ENDPOINT}/{B2_BUCKET}/{key}"
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -72,21 +87,31 @@ async def tts(req: TTSRequest):
             status_code=400, detail=f"text too long (max {MAX_TEXT} chars)"
         )
 
+    key = f"tts/{slugify(req.filename)}.mp3"
+    url = public_url(key)
+
+    # Cache hit: audio for this slug already exists in B2. Reuse it instead of
+    # burning Render CPU time and B2 write transactions on a re-synthesis.
+    try:
+        if object_exists(key):
+            return {"url": url, "bytes": 0, "duration_s": 0, "cached": True}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"B2 check failed: {exc}")
+
     voice = req.voice or os.environ.get("TTS_VOICE", "en-KE-AsiliaNeural")
     try:
         mp3 = await synth(text, voice=voice)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"TTS synthesis failed: {exc}")
 
-    key = f"tts/{slugify(req.filename)}.mp3"
     try:
         upload_to_b2(mp3, key, "audio/mpeg")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"B2 upload failed: {exc}")
 
-    if PUBLIC_BASE:
-        url = f"{PUBLIC_BASE.rstrip('/')}/{key}"
-    else:
-        url = f"{B2_ENDPOINT}/{B2_BUCKET}/{key}"
-
-    return {"url": url, "bytes": len(mp3), "duration_s": round(len(mp3) / 16000, 1)}
+    return {
+        "url": url,
+        "bytes": len(mp3),
+        "duration_s": round(len(mp3) / 16000, 1),
+        "cached": False,
+    }
