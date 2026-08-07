@@ -1,6 +1,11 @@
 name = "puntersure-audio-proxy"
 main = "index.js"
 compatibility_date = "2026-07-01"
+workers_dev = true
+
+routes = [
+  { pattern = "audio.puntersure-tips.com", custom_domain = true }
+]
 
 [observability]
 enabled = true
