@@ -114,6 +114,7 @@ async def synth_segment(
     rate: str = DEFAULT_RATE,
     pitch: str = DEFAULT_PITCH,
     volume: str = DEFAULT_VOLUME,
+    trim_lead: bool = True,
 ) -> tuple:
     """Synthesize one plain-text segment, trim natural sentence gaps,
     return (pcm float32 mono, sample_rate)."""
@@ -140,7 +141,8 @@ async def synth_segment(
     sr = d.sample_rate
     x = np.asarray(d.samples, dtype=np.float32)
     x = trim_sentence_gaps(x, sr)
-    x = trim_leading_silence(x, sr)
+    if trim_lead:
+        x = trim_leading_silence(x, sr)
     return x, sr
 
 
@@ -159,12 +161,19 @@ async def synth_segments(segments: list, voice: str = VOICE) -> bytes:
         text = (seg.get("text") or "").strip()
         if not text:
             continue
+        # First segment keeps its full natural leading silence: edge-tts
+        # prepends ~0.2-0.3s of true silence, and the amplitude threshold in
+        # trim_leading_silence can slice the attack of the very first word
+        # (e.g. "Hey" -> "ey"). A short natural lead at the start of the audio
+        # is fine — there is no previous break to overrun. Later segments keep
+        # the aggressive trim so explicit inter-segment breaks stay exact.
         x, s = await synth_segment(
             text,
             voice,
             rate=seg.get("rate", DEFAULT_RATE),
             pitch=seg.get("pitch", DEFAULT_PITCH),
             volume=seg.get("volume", DEFAULT_VOLUME),
+            trim_lead=master is not None,
         )
         if sr is None:
             sr = s
