@@ -46,6 +46,13 @@ def trim_sentence_gaps(pcm: np.ndarray, sr: int) -> np.ndarray:
 
     keep = np.ones(n, dtype=bool)
     for idx, (s, e, dur) in enumerate(pauses):
+        # The very first pause starts at index 0: that is the utterance's
+        # natural leading silence plus the (quiet) onset of its first word,
+        # NOT an inter-sentence gap. Collapsing it here slices the first
+        # consonant (e.g. "Hello" -> "ello"). Leave it untouched; the caller
+        # decides whether to trim the lead via trim_leading_silence.
+        if s == 0:
+            continue
         is_last = idx == len(pauses) - 1
         if is_last and e >= n - 1:
             new_e = s + int(0.10 * sr)
